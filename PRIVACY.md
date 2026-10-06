@@ -1,16 +1,22 @@
 # Privacy Policy
 
+This policy covers the AACT Clinical Trials MCP server. The server connects to an external database.
+
+## External connection
+
+The server sends your AACT username, password, and SQL queries to the public AACT PostgreSQL service at `aact-db.ctti-clinicaltrials.org`, operated by the Clinical Trials Transformation Initiative (CTTI) at Duke University. Credentials are used only to authenticate with that database. They are not logged, stored, or sent to any other service. Query results are returned to your MCP client.
+
 ## Disclaimer
 
 This is an independent, third-party wrapper for the [AACT database](https://aact.ctti-clinicaltrials.org). It is **not** affiliated with, endorsed by, or maintained by the Clinical Trials Transformation Initiative ([CTTI](https://ctti-clinicaltrials.org)) or Duke University. AACT is a publicly available relational database that aggregates data from ClinicalTrials.gov — see the [AACT case study](https://connects.ctti-clinicaltrials.org/show/57.pdf) for background.
 
 ## Data Collection
 
-This MCP server does **not** collect, store, or transmit any personal data. It acts as a read-only bridge between Claude and the publicly available AACT database.
+The server does not collect or store personal data of its own, and it does not run analytics, telemetry, or tracking. It is a read-only bridge between your MCP client and the AACT database. Query results stay in process memory for pagination and are discarded when the process exits.
 
 ## Database Access
 
-- All queries are **read-only** (SELECT only). No data can be written, modified, or deleted.
+- All queries are **read-only**: a single SELECT, WITH (CTE), or EXPLAIN. No data can be written, modified, or deleted.
 - The server connects to the AACT database hosted by the Clinical Trials Transformation Initiative (CTTI) at Duke University.
 - Your AACT credentials (username and password) are used only to authenticate with the AACT database and are never logged, stored, or transmitted elsewhere.
 

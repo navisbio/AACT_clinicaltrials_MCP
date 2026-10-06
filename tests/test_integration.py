@@ -219,14 +219,14 @@ class TestBufferManagement:
         page1 = await client.call_tool("fetch_rows", {
             "query_id": q1, "start": 0, "count": 5,
         })
-        assert page1.isError is not True
+        assert page1.is_error is not True
         page1_data = parse_tool_result(page1)[0]
         assert page1_data["count"] == 5
 
         page2 = await client.call_tool("fetch_rows", {
             "query_id": q2, "start": 0, "count": 5,
         })
-        assert page2.isError is not True
+        assert page2.is_error is not True
         page2_data = parse_tool_result(page2)[0]
         assert page2_data["count"] == 5
 
@@ -243,20 +243,20 @@ class TestBufferManagement:
         result = await client.call_tool("fetch_rows", {
             "query_id": query_ids[0], "start": 0, "count": 5,
         })
-        assert result.isError is True
+        assert result.is_error is True
 
         # The second query_id should still be available (5 slots: ids 1-5)
         result = await client.call_tool("fetch_rows", {
             "query_id": query_ids[1], "start": 0, "count": 5,
         })
-        assert result.isError is not True
+        assert result.is_error is not True
 
     async def test_fetch_rows_without_prior_query_raises_error(self, client):
         """Calling fetch_rows before any read_query should fail."""
         result = await client.call_tool("fetch_rows", {
             "query_id": "q999", "start": 0, "count": 5,
         })
-        assert result.isError is True
+        assert result.is_error is True
 
 
 # ---------------------------------------------------------------------------
@@ -271,42 +271,42 @@ class TestReadOnlyEnforcement:
         result = await client.call_tool("read_query", {
             "query": "INSERT INTO studies (nct_id) VALUES ('test')",
         })
-        assert result.isError is True
+        assert result.is_error is True
 
     async def test_rejects_delete_query(self, client):
         """DELETE queries should be rejected."""
         result = await client.call_tool("read_query", {
             "query": "DELETE FROM studies",
         })
-        assert result.isError is True
+        assert result.is_error is True
 
     async def test_rejects_drop_query(self, client):
         """DROP queries should be rejected."""
         result = await client.call_tool("read_query", {
             "query": "DROP TABLE studies",
         })
-        assert result.isError is True
+        assert result.is_error is True
 
     async def test_allows_cte_query(self, client):
         """WITH (CTE) queries should be accepted."""
         result = await client.call_tool("read_query", {
             "query": "WITH t AS (SELECT nct_id FROM ctgov.studies LIMIT 3) SELECT * FROM t",
         })
-        assert result.isError is not True
+        assert result.is_error is not True
 
     async def test_allows_explain_query(self, client):
         """EXPLAIN queries should be accepted."""
         result = await client.call_tool("read_query", {
             "query": "EXPLAIN SELECT nct_id FROM ctgov.studies LIMIT 1",
         })
-        assert result.isError is not True
+        assert result.is_error is not True
 
     async def test_allows_commented_query(self, client):
         """A SELECT query preceded by SQL comments should be accepted."""
         result = await client.call_tool("read_query", {
             "query": "-- fetch studies\nSELECT nct_id FROM ctgov.studies LIMIT 3",
         })
-        assert result.isError is not True
+        assert result.is_error is not True
         summary = parse_tool_result(result)[0]
         assert summary["row_count"] == 3
 
@@ -342,9 +342,17 @@ class TestMetadataEnrichment:
         result = await client.call_tool("list_tables", {})
         tables = parse_tool_result(result)
         studies = next(t for t in tables if t["table_name"] == "studies")
-        assert "approximate_row_count" in studies
+        assert studies["relation_type"] == "table"
         assert isinstance(studies["approximate_row_count"], int)
         assert studies["approximate_row_count"] > 0
+
+    async def test_views_do_not_report_zero_rows(self, client):
+        """all_* views have no PostgreSQL row estimate, so the count is null."""
+        result = await client.call_tool("list_tables", {})
+        tables = parse_tool_result(result)
+        view = next(t for t in tables if t["table_name"] == "all_conditions")
+        assert view["relation_type"] == "view"
+        assert view["approximate_row_count"] is None
 
     async def test_describe_table_includes_sample_values(self, client):
         """describe_table should populate sample_values for low-cardinality columns."""
@@ -385,7 +393,7 @@ class TestMetadataEnrichment:
         """describe_table should include approximate_row_count in the response."""
         result = await client.call_tool("describe_table", {"table_name": "studies"})
         data = parse_tool_result(result)[0]
-        assert "approximate_row_count" in data
+        assert data["relation_type"] == "table"
         assert isinstance(data["approximate_row_count"], int)
         assert data["approximate_row_count"] > 0
 
@@ -414,7 +422,7 @@ class TestCTEAndExplain:
         result = await client.call_tool("read_query", {
             "query": "WITH recent AS (SELECT nct_id FROM ctgov.studies LIMIT 5) SELECT * FROM recent",
         })
-        assert result.isError is not True
+        assert result.is_error is not True
         summary = parse_tool_result(result)[0]
         assert summary["row_count"] == 5
 
@@ -423,7 +431,7 @@ class TestCTEAndExplain:
         result = await client.call_tool("read_query", {
             "query": "EXPLAIN SELECT nct_id FROM ctgov.studies LIMIT 5",
         })
-        assert result.isError is not True
+        assert result.is_error is not True
         summary = parse_tool_result(result)[0]
         assert summary["row_count"] > 0
 
@@ -433,7 +441,7 @@ class TestCTEAndExplain:
             "query": "EXPLAIN SELECT s.nct_id FROM ctgov.studies s JOIN ctgov.conditions c ON s.nct_id = c.nct_id LIMIT 5",
             "preview_rows": 2,  # Would normally limit preview, but EXPLAIN overrides
         })
-        assert result.isError is not True
+        assert result.is_error is not True
         summary = parse_tool_result(result)[0]
         # All plan rows should appear in preview
         assert len(summary["preview"]) == summary["row_count"]
@@ -451,18 +459,32 @@ class TestErrorSurfacing:
         result = await client.call_tool("read_query", {
             "query": "SELECT nonexistent_column_xyz FROM ctgov.studies LIMIT 1",
         })
-        assert result.isError is True
-        error_text = result.content[0].text
-        assert "nonexistent_column_xyz" in error_text
+        assert result.is_error is True
+        payload = json.loads(result.content[0].text)
+        assert payload["is_error"] is True
+        assert payload["error_type"] == "undefined_column"
+        assert "nonexistent_column_xyz" in payload["message"]
+        assert "password" not in payload["message"].lower()
 
     async def test_bad_table_surfaces_error(self, client):
         """Querying a non-existent table should return an error with the table name."""
         result = await client.call_tool("read_query", {
             "query": "SELECT * FROM ctgov.nonexistent_table_xyz LIMIT 1",
         })
-        assert result.isError is True
-        error_text = result.content[0].text
-        assert "nonexistent_table_xyz" in error_text
+        assert result.is_error is True
+        payload = json.loads(result.content[0].text)
+        assert payload["error_type"] == "undefined_table"
+        assert "nonexistent_table_xyz" in payload["message"]
+
+    async def test_missing_column_hint_names_the_real_column(self, client):
+        """A qualified missing column should point at the closest real column."""
+        result = await client.call_tool("read_query", {
+            "query": "SELECT ion.other_name FROM ctgov.intervention_other_names ion LIMIT 1",
+        })
+        assert result.is_error is True
+        payload = json.loads(result.content[0].text)
+        assert payload["error_type"] == "undefined_column"
+        assert payload["hint"] == "Available similar column: intervention_other_names.name"
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +547,8 @@ class TestDatabaseInfo:
         assert "pg_version" in info
         assert "schema_name" in info
         assert "table_count" in info
+        assert info["refresh_frequency"] == "daily"
+        assert info["newest_last_update_posted_date"]
         assert "note" in info
 
     async def test_schema_ctgov(self, client):

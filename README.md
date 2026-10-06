@@ -24,6 +24,8 @@ A structured PostgreSQL database makes it far easier to **aggregate, combine, an
 
 All tables join on `nct_id`.
 
+Every `read_query` statement is parsed before it runs. Only one read-only `SELECT`, `WITH`, or `EXPLAIN` statement is accepted. It runs in a read-only database session and is cancelled after 2 minutes.
+
 ## Setup
 
 1. Create a free account at https://aact.ctti-clinicaltrials.org/users/sign_up
@@ -34,7 +36,7 @@ All tables join on `nct_id`.
 
 ### Option 1: Claude Desktop Plugin (recommended)
 
-Download the latest `.mcpb` file from [Releases](https://github.com/navisbio/mcp-server-aact/releases) and open it in Claude Desktop. You'll be prompted for your AACT credentials.
+Download the latest `.mcpb` file from [Releases](https://github.com/navisbio/AACT_clinicaltrials_MCP/releases) and open it in Claude Desktop. You'll be prompted for your AACT credentials.
 
 ### Option 2: Published package
 
@@ -76,8 +78,8 @@ Add to your `claude_desktop_config.json` (`~/Library/Application Support/Claude/
 ### Option 4: From source
 
 ```bash
-git clone https://github.com/navisbio/mcp-server-aact.git
-cd mcp-server-aact
+git clone https://github.com/navisbio/AACT_clinicaltrials_MCP.git
+cd AACT_clinicaltrials_MCP
 uv sync
 ```
 
@@ -86,7 +88,7 @@ uv sync
   "mcpServers": {
     "aact": {
       "command": "uv",
-      "args": ["run", "--directory", "/path/to/mcp-server-aact", "mcp-server-aact"],
+      "args": ["run", "--directory", "/path/to/AACT_clinicaltrials_MCP", "mcp-server-aact"],
       "env": {
         "DB_USER": "your_username",
         "DB_PASSWORD": "your_password"
@@ -155,7 +157,7 @@ The system cannot find `uvx`. Use the full path:
 
 ## Contributing
 
-- Open an issue on [GitHub](https://github.com/navisbio/mcp-server-aact)
+- Open an issue on [GitHub](https://github.com/navisbio/AACT_clinicaltrials_MCP)
 - Email: jonas.walheim@navis-bio.com
 
 ## License
