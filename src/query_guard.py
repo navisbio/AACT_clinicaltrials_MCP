@@ -46,6 +46,7 @@ _BLOCKED_FUNCTIONS = frozenset(
         "pg_ls_logdir",
         "pg_ls_tmpdir",
         "pg_ls_waldir",
+        "pg_notify",
         "pg_promote",
         "pg_read_binary_file",
         "pg_read_file",
