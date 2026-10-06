@@ -34,13 +34,11 @@ async def client():
     anyio's cancel scope checks. We catch this at teardown since the server
     task is properly cancelled regardless.
     """
-    from mcp.shared.memory import create_connected_server_and_client_session
+    from mcp.client import Client
     from src.server import mcp as server
 
     try:
-        async with create_connected_server_and_client_session(
-            server, raise_exceptions=True
-        ) as session:
+        async with Client(server, raise_exceptions=True) as session:
             yield session
     except (RuntimeError, BaseExceptionGroup):
         # Known pytest-asyncio + anyio teardown incompatibility:

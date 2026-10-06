@@ -79,3 +79,6 @@ smoketest/results/
 .claude-plugin/
 .devcontainer/
 skills/
+
+# Local ChatGPT tunnel (tunnel-client runtime; not part of the public server)
+server/

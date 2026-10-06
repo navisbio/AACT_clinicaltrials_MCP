@@ -1,19 +1,27 @@
 [project]
 name = "mcp-server-aact"
-version = "0.5.0"
+version = "0.6.0"
 description = "MCP server for AACT clinical trials database"
 requires-python = ">=3.10,<3.14"
 dependencies = [
-    "mcp>=1.25,<2",
-    "pydantic-settings>=2.0",
-    "psycopg2-binary",
-    "python-dotenv"
+    "mcp>=2.3.0,<3",
+    "pydantic-settings>=2.15.0",
+    "psycopg2-binary>=2.9.13",
+    "python-dotenv>=1.2.4",
+    "sqlglot>=30.21.0",
 ]
 
 [project.optional-dependencies]
 test = [
-    "pytest",
-    "pytest-asyncio"
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]
+
+[dependency-groups]
+dev = [
+    "pyright>=1.1.414",
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
 ]
 
 [build-system]
@@ -24,13 +32,6 @@ build-backend = "hatchling.build"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
-
-[tool.uv]
-dev-dependencies = [
-    "pyright>=1.1.389",
-    "pytest>=8.3.4",
-    "pytest-asyncio>=0.24.0",
-]
 
 [project.scripts]
 mcp-server-aact = "src:main"

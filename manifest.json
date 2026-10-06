@@ -1,7 +1,7 @@
 {
   "manifest_version": "0.3",
   "name": "mcp-server-aact",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "display_name": "AACT Clinical Trials Database",
   "description": "Query the AACT (ClinicalTrials.gov) database directly from Claude. Explore 70+ tables of clinical trial data — studies, interventions, outcomes, sponsors, facilities — using read-only SQL with buffered pagination. All tables join on nct_id.",
   "author": {
@@ -10,10 +10,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "https://github.com/navisbio/mcp-server-aact"
+    "url": "https://github.com/navisbio/AACT_clinicaltrials_MCP"
   },
   "license": "MIT",
-  "privacy_policies": ["https://github.com/navisbio/mcp-server-aact/blob/main/PRIVACY.md"],
+  "privacy_policies": [
+    "https://github.com/navisbio/AACT_clinicaltrials_MCP/blob/main/PRIVACY.md"
+  ],
   "tools": [
     {
       "name": "database_info",
@@ -60,13 +62,13 @@
     "db_user": {
       "type": "string",
       "title": "AACT Database Username",
-      "description": "Your AACT username. Register free at https://aact.ctti-clinicaltrials.org",
+      "description": "Required credential DB_USER. Your AACT username. Register free at https://aact.ctti-clinicaltrials.org",
       "required": true
     },
     "db_password": {
       "type": "string",
       "title": "AACT Database Password",
-      "description": "Your AACT password",
+      "description": "Required credential DB_PASSWORD. Your AACT password. Stored by the client and sent only to the AACT database.",
       "required": true,
       "sensitive": true
     }

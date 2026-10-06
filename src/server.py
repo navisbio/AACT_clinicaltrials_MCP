@@ -1,3 +1,4 @@
+import functools
 import logging
 import re
 from collections import OrderedDict
@@ -7,11 +8,14 @@ from dataclasses import dataclass, field
 from typing import Annotated
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP, Context
-from mcp.types import TextContent
+from mcp.server.mcpserver import MCPServer, Context
+from mcp.server.mcpserver.exceptions import ToolError
+from mcp.types import TextContent, ToolAnnotations
+from psycopg2 import sql
 from pydantic import Field
 
-from .database import AACTDatabase, _strip_leading_comments
+from .database import AACTDatabase
+from .query_guard import query_is_explain
 from .models import (
     GROUNDING_NOTICE,
     TableInfo,
@@ -24,7 +28,7 @@ from .models import (
 logger = logging.getLogger('mcp_aact_server')
 
 MAX_BUFFERS = 5
-ALLOWED_QUERY_PREFIXES = ("SELECT", "WITH", "EXPLAIN")
+_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
 
 
 @dataclass
@@ -35,16 +39,17 @@ class AppContext:
 
 
 @asynccontextmanager
-async def app_lifespan(server: FastMCP) -> AsyncIterator[AppContext]:
+async def app_lifespan(server: MCPServer) -> AsyncIterator[AppContext]:
     """Manage application lifecycle — initialize DB on startup."""
     db = AACTDatabase()
     try:
         yield AppContext(db=db)
     finally:
+        db.close()
         logger.info("Server shutting down")
 
 
-mcp = FastMCP(
+mcp = MCPServer(
     name="AACT Clinical Trials Database",
     instructions="""You are an MCP server providing access to the AACT (Aggregate Analysis of ClinicalTrials.gov) database.
 
@@ -85,7 +90,46 @@ If the data is insufficient, say so and suggest a follow-up query.""",
 
 def _get_ctx(ctx: Context) -> AppContext:
     """Extract AppContext from lifespan context."""
-    return ctx.request_context.lifespan_context
+    lifespan = ctx.request_context.lifespan_context
+    if not isinstance(lifespan, AppContext):
+        raise RuntimeError("Server lifespan is not initialized")
+    return lifespan
+
+
+def _tool_annotations(title: str, *, open_world: bool = True) -> ToolAnnotations:
+    return ToolAnnotations(
+        title=title,
+        read_only_hint=True,
+        destructive_hint=False,
+        open_world_hint=open_world,
+    )
+
+
+def _expose_errors(fn):
+    """Turn anticipated ValueErrors into ToolErrors so the client sees the message.
+
+    MCP 2 treats any other exception as a crash and replaces it with
+    "Error executing tool <name>", which hides the column or syntax detail
+    the model needs. The message is already safe for the client.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except ValueError as exc:
+            raise ToolError(str(exc)) from None
+
+    return wrapper
+
+
+def _identifier(name: str, kind: str) -> sql.Identifier:
+    """Quote a table or column name. Rejects anything that is not a plain identifier."""
+    if not _IDENTIFIER.match(name):
+        raise ValueError(f"Invalid {kind}: {name}")
+    return sql.Identifier(name)
 
 
 def grounded_result(data: object) -> list[TextContent]:
@@ -97,7 +141,8 @@ def grounded_result(data: object) -> list[TextContent]:
     ]
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@mcp.tool(annotations=_tool_annotations("List tables"))
+@_expose_errors
 async def list_tables(ctx: Context):
     """Call this first to discover available tables before writing any queries.
     Returns all table names in the AACT ctgov schema (studies, interventions, outcomes, etc.)
@@ -111,7 +156,7 @@ async def list_tables(ctx: Context):
         WHERE t.table_schema = 'ctgov'
         ORDER BY t.table_name;
     """)
-    await ctx.debug(f"Retrieved {len(results)} tables")
+    logger.debug("Retrieved %s tables", len(results))
     tables = [
         TableInfo(
             table_name=row['table_name'],
@@ -121,7 +166,8 @@ async def list_tables(ctx: Context):
     return grounded_result(tables)
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@mcp.tool(annotations=_tool_annotations("Describe table"))
+@_expose_errors
 async def describe_table(
     table_name: Annotated[str, Field(description="Name of the table to describe", min_length=1)],
     ctx: Context,
@@ -135,9 +181,7 @@ async def describe_table(
     overall_status, study_type, or any enum-like column) to learn the exact stored values — do NOT guess the format."""
     app = _get_ctx(ctx)
 
-    # Sanitize table_name
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
-        raise ValueError(f"Invalid table name: {table_name}")
+    table = _identifier(table_name, "table name")
 
     results, _ = app.db.execute_query("""
         SELECT column_name, data_type, character_maximum_length
@@ -147,7 +191,7 @@ async def describe_table(
         ORDER BY ordinal_position;
     """, {"table_name": table_name})
 
-    await ctx.debug(f"Retrieved {len(results)} columns for table {table_name}")
+    logger.debug("Retrieved %s columns for table %s", len(results), table_name)
 
     # Get approximate row count from pg_class
     row_count_rows, _ = app.db.execute_query("""
@@ -176,15 +220,18 @@ async def describe_table(
     # Fetch sample values for low-cardinality columns
     sample_values_map: dict[str, list[str]] = {}
     for col_name in low_card_cols:
-        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', col_name):
+        if not _IDENTIFIER.match(col_name):
             continue
         try:
+            column = sql.Identifier(col_name)
             vals, _ = app.db.execute_query(
-                f"SELECT {col_name} AS value, COUNT(*) AS count "
-                f"FROM ctgov.{table_name} "
-                f"WHERE {col_name} IS NOT NULL "
-                f"GROUP BY {col_name} "
-                f"ORDER BY count DESC LIMIT 10"
+                sql.SQL(
+                    "SELECT {column} AS value, COUNT(*) AS count "
+                    "FROM ctgov.{table} "
+                    "WHERE {column} IS NOT NULL "
+                    "GROUP BY {column} "
+                    "ORDER BY count DESC LIMIT 10"
+                ).format(column=column, table=table)
             )
             sample_values_map[col_name] = [str(v['value']) for v in vals]
         except Exception:
@@ -196,12 +243,12 @@ async def describe_table(
         row['column_name'] for row in results
         if row['column_name'] not in low_card_cols
         and row['data_type'] in ('character varying', 'text')
-        and re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', row['column_name'])
+        and _IDENTIFIER.match(row['column_name'])
     ]
     if text_cols and results:
         try:
             sample_rows, _ = app.db.execute_query(
-                f"SELECT * FROM ctgov.{table_name} LIMIT 3"
+                sql.SQL("SELECT * FROM ctgov.{table} LIMIT 3").format(table=table)
             )
             for col in text_cols:
                 vals = [str(r[col]) for r in sample_rows if r.get(col) is not None]
@@ -227,7 +274,8 @@ async def describe_table(
     })
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@mcp.tool(annotations=_tool_annotations("Get column values"))
+@_expose_errors
 async def get_column_values(
     table_name: Annotated[str, Field(description="Table name in the ctgov schema", min_length=1)],
     column_name: Annotated[str, Field(description="Column to get distinct values for", min_length=1)],
@@ -244,26 +292,32 @@ async def get_column_values(
     Returns up to `limit` values sorted by frequency (most common first)."""
     app = _get_ctx(ctx)
 
-    # Sanitize table/column names to prevent injection (only allow alphanumeric + underscore)
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
-        raise ValueError(f"Invalid table name: {table_name}")
-    if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', column_name):
-        raise ValueError(f"Invalid column name: {column_name}")
+    table = _identifier(table_name, "table name")
+    column = _identifier(column_name, "column name")
 
     results, _ = app.db.execute_query(
-        f"SELECT {column_name} AS value, COUNT(*) AS count "
-        f"FROM ctgov.{table_name} "
-        f"WHERE {column_name} IS NOT NULL "
-        f"GROUP BY {column_name} "
-        f"ORDER BY count DESC "
-        f"LIMIT {limit}"
+        sql.SQL(
+            "SELECT {column} AS value, COUNT(*) AS count "
+            "FROM ctgov.{table} "
+            "WHERE {column} IS NOT NULL "
+            "GROUP BY {column} "
+            "ORDER BY count DESC "
+            "LIMIT %s"
+        ).format(column=column, table=table),
+        {"limit": limit},
     )
 
-    await ctx.debug(f"Retrieved {len(results)} distinct values for {table_name}.{column_name}")
+    logger.debug(
+        "Retrieved %s distinct values for %s.%s",
+        len(results),
+        table_name,
+        column_name,
+    )
     return grounded_result(results)
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@mcp.tool(annotations=_tool_annotations("Read query"))
+@_expose_errors
 async def read_query(
     query: Annotated[str, Field(description="SELECT SQL query to execute", min_length=1)],
     ctx: Context,
@@ -279,7 +333,9 @@ async def read_query(
     """Run a read-only query and get a summary with a preview of results.
     Full results are buffered server-side — call fetch_rows with the returned query_id
     to page through them without re-executing the query.
-    SELECT, WITH (CTE), and EXPLAIN / EXPLAIN ANALYZE queries are allowed. Use WHERE and LIMIT to narrow results.
+    The query must be one SELECT, WITH (CTE), or EXPLAIN statement. It is parsed before
+    it runs, executed in a read-only transaction, and cancelled after 2 minutes.
+    Use WHERE and LIMIT to narrow results.
     If truncated is true, the query had more rows than max_rows — add a LIMIT or tighter WHERE.
 
     IMPORTANT: Before writing your query, call get_column_values on any column you plan to
@@ -307,20 +363,13 @@ async def read_query(
     app = _get_ctx(ctx)
 
     query = query.strip()
-    stripped = _strip_leading_comments(query)
-    if not stripped.upper().startswith(ALLOWED_QUERY_PREFIXES):
-        raise ValueError(
-            "Only SELECT, WITH (CTE), and EXPLAIN queries are allowed. "
-            "Rewrite your query to start with SELECT, WITH, or EXPLAIN."
-        )
-
-    # EXPLAIN queries: show all rows in preview (the plan is usually small)
-    if stripped.upper().startswith("EXPLAIN"):
+    # EXPLAIN plans are small; return the whole plan in the preview.
+    if query_is_explain(query):
         preview_rows = max_rows
 
     results, truncated = app.db.execute_query(query, row_limit=max_rows)
     row_count = len(results)
-    await ctx.debug(f"Query returned {row_count} rows (truncated={truncated})")
+    logger.debug("Query returned %s rows (truncated=%s)", row_count, truncated)
 
     columns = list(results[0].keys()) if results else []
 
@@ -364,7 +413,8 @@ async def read_query(
     return result
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": False})
+@mcp.tool(annotations=_tool_annotations("Fetch rows", open_world=False))
+@_expose_errors
 async def fetch_rows(
     query_id: Annotated[str, Field(description="query_id from a previous read_query result")],
     ctx: Context,
@@ -409,7 +459,8 @@ async def fetch_rows(
     return grounded_result(result.model_dump())
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@mcp.tool(annotations=_tool_annotations("Search columns"))
+@_expose_errors
 async def search_columns(
     keyword: Annotated[str, Field(description="Keyword to search for in column names (case-insensitive)", min_length=1)],
     ctx: Context,
@@ -422,8 +473,7 @@ async def search_columns(
     app = _get_ctx(ctx)
 
     if table_name is not None:
-        if not re.match(r'^[a-zA-Z_][a-zA-Z0-9_]*$', table_name):
-            raise ValueError(f"Invalid table name: {table_name}")
+        _identifier(table_name, "table name")
         results, _ = app.db.execute_query(
             "SELECT table_name, column_name, data_type "
             "FROM information_schema.columns "
@@ -442,11 +492,12 @@ async def search_columns(
             "ORDER BY table_name, column_name",
             {"keyword": f"%{keyword}%"},
         )
-    await ctx.debug(f"Found {len(results)} columns matching '{keyword}'")
+    logger.debug("Found %s columns matching '%s'", len(results), keyword)
     return grounded_result(results)
 
 
-@mcp.tool(annotations={"readOnlyHint": True, "openWorldHint": True})
+@mcp.tool(annotations=_tool_annotations("Database info"))
+@_expose_errors
 async def database_info(ctx: Context):
     """Get database connection info: server time, PostgreSQL version, schema, and table count.
     Call this to confirm the connection is working and check data currency.
