@@ -34,6 +34,8 @@ _BLOCKED_FUNCTIONS = frozenset(
         "lo_unlink",
         "pg_advisory_lock",
         "pg_advisory_lock_shared",
+        "pg_advisory_unlock",
+        "pg_advisory_unlock_all",
         "pg_advisory_xact_lock",
         "pg_advisory_xact_lock_shared",
         "pg_cancel_backend",
