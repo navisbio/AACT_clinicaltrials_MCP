@@ -31,22 +31,118 @@ _SECRET_TEXT = re.compile(
 )
 
 
+_COLUMN_MESSAGE = re.compile(
+    r"""column\s+(?:(?P<qualifier>[A-Za-z_][A-Za-z0-9_]*)\.)?"""
+    r"""(?:"(?P<quoted>[^"]+)"|(?P<bare>[A-Za-z_][A-Za-z0-9_]*))"""
+    r"""\s+does not exist""",
+    re.IGNORECASE,
+)
+_RELATION_MESSAGE = re.compile(
+    r"""relation\s+"(?P<name>[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)?)"\s+does not exist""",
+    re.IGNORECASE,
+)
+_SQLSTATE_TYPES = {
+    "42703": "undefined_column",
+    "42P01": "undefined_table",
+    "42601": "syntax_error",
+    "57014": "query_canceled",
+}
+_GENERIC_DATABASE_ERROR = "Database error: the query could not be executed."
+
+
+class ClientDatabaseError(ValueError):
+    """A database failure whose text is safe to show to the model."""
+
+    def __init__(
+        self,
+        error_type: str,
+        message: str,
+        *,
+        missing_column: str | None = None,
+        column_qualifier: str | None = None,
+        missing_table: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.message = message
+        self.missing_column = missing_column
+        self.column_qualifier = column_qualifier
+        self.missing_table = missing_table
+
+    def as_dict(self, hint: str | None = None) -> dict[str, Any]:
+        return {
+            "is_error": True,
+            "error_type": self.error_type,
+            "message": self.message,
+            "hint": hint,
+        }
+
+
 def public_database_error(exc: BaseException) -> str:
     """Client-facing text for a database failure. Omits host, user, and password."""
+    return client_database_error(exc).message
+
+
+def client_database_error(exc: BaseException) -> ClientDatabaseError:
+    """Classify a database failure without copying connection details."""
     if isinstance(exc, psycopg2.errors.QueryCanceled):
-        return (
+        return ClientDatabaseError(
+            "query_canceled",
             "The query was cancelled because it exceeded the 2 minute time limit. "
-            "Narrow it with a tighter WHERE or LIMIT and try again."
+            "Narrow it with a tighter WHERE or LIMIT and try again.",
         )
     if isinstance(exc, psycopg2.OperationalError):
-        return (
+        return ClientDatabaseError(
+            "connection_error",
             "Could not reach the AACT database. "
-            "Check your credentials and network, then try again."
+            "Check your credentials and network, then try again.",
         )
     primary = _diagnostic_message(exc)
+    column, qualifier = _missing_column(primary)
+    table = _missing_relation(primary)
     if primary:
-        return f"Database error: {_scrub(primary)}"
-    return "Database error: the query could not be executed."
+        return ClientDatabaseError(
+            _error_type(exc, column=column, table=table),
+            _scrub(primary),
+            missing_column=column,
+            column_qualifier=qualifier,
+            missing_table=table,
+        )
+    return ClientDatabaseError("database_error", _GENERIC_DATABASE_ERROR)
+
+
+def _error_type(
+    exc: BaseException, *, column: str | None, table: str | None
+) -> str:
+    code = getattr(exc, "pgcode", None)
+    if isinstance(code, str) and code in _SQLSTATE_TYPES:
+        return _SQLSTATE_TYPES[code]
+    if column:
+        return "undefined_column"
+    if table:
+        return "undefined_table"
+    return "database_error"
+
+
+def _missing_column(primary: str | None) -> tuple[str | None, str | None]:
+    if not primary:
+        return None, None
+    match = _COLUMN_MESSAGE.search(primary)
+    if match is None:
+        return None, None
+    name = match.group("quoted") or match.group("bare")
+    return name, match.group("qualifier")
+
+
+def _missing_relation(primary: str | None) -> str | None:
+    if not primary:
+        return None
+    match = _RELATION_MESSAGE.search(primary)
+    if match is None:
+        return None
+    name = match.group("name")
+    schema, separator, table = name.partition(".")
+    return table if separator else schema
 
 
 def _diagnostic_message(exc: BaseException) -> str | None:
@@ -248,7 +344,7 @@ class AACTDatabase:
             logger.warning(
                 "Database session setup failed: %s", public_database_error(exc)
             )
-            raise ValueError(public_database_error(exc)) from None
+            raise client_database_error(exc) from None
 
     @contextmanager
     def _connection(self) -> Any:
@@ -304,7 +400,7 @@ class AACTDatabase:
                     )
                     return [dict(row) for row in results], truncated
         except TimeoutError as exc:
-            raise ValueError(str(exc)) from None
+            raise ClientDatabaseError("connection_error", str(exc)) from None
         except psycopg2.Error as exc:
             self._raise_public(exc)
 
@@ -316,8 +412,9 @@ class AACTDatabase:
             raise
 
     def _raise_public(self, exc: psycopg2.Error) -> NoReturn:
-        logger.warning("Database error: %s", public_database_error(exc))
-        raise ValueError(public_database_error(exc)) from None
+        error = client_database_error(exc)
+        logger.warning("Database error: %s", error.message)
+        raise error from None
 
 
 def _param_values(

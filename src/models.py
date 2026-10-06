@@ -12,9 +12,13 @@ GROUNDING_NOTICE = (
 
 
 class TableInfo(BaseModel):
-    """Information about a database table."""
-    table_name: str = Field(..., description="Name of the table")
-    approximate_row_count: int | None = Field(None, description="Approximate number of rows (from pg_class statistics)")
+    """Information about a database table or view."""
+    table_name: str = Field(..., description="Name of the table or view")
+    relation_type: str = Field(..., description="table or view. Views do not have a row estimate.")
+    approximate_row_count: int | None = Field(
+        None,
+        description="Approximate number of rows from PostgreSQL statistics. Null for views and when statistics are missing.",
+    )
 
 
 class ColumnInfo(BaseModel):

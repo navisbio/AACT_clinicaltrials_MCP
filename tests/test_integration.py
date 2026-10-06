@@ -342,9 +342,17 @@ class TestMetadataEnrichment:
         result = await client.call_tool("list_tables", {})
         tables = parse_tool_result(result)
         studies = next(t for t in tables if t["table_name"] == "studies")
-        assert "approximate_row_count" in studies
+        assert studies["relation_type"] == "table"
         assert isinstance(studies["approximate_row_count"], int)
         assert studies["approximate_row_count"] > 0
+
+    async def test_views_do_not_report_zero_rows(self, client):
+        """all_* views have no PostgreSQL row estimate, so the count is null."""
+        result = await client.call_tool("list_tables", {})
+        tables = parse_tool_result(result)
+        view = next(t for t in tables if t["table_name"] == "all_conditions")
+        assert view["relation_type"] == "view"
+        assert view["approximate_row_count"] is None
 
     async def test_describe_table_includes_sample_values(self, client):
         """describe_table should populate sample_values for low-cardinality columns."""
@@ -385,7 +393,7 @@ class TestMetadataEnrichment:
         """describe_table should include approximate_row_count in the response."""
         result = await client.call_tool("describe_table", {"table_name": "studies"})
         data = parse_tool_result(result)[0]
-        assert "approximate_row_count" in data
+        assert data["relation_type"] == "table"
         assert isinstance(data["approximate_row_count"], int)
         assert data["approximate_row_count"] > 0
 
@@ -452,8 +460,11 @@ class TestErrorSurfacing:
             "query": "SELECT nonexistent_column_xyz FROM ctgov.studies LIMIT 1",
         })
         assert result.is_error is True
-        error_text = result.content[0].text
-        assert "nonexistent_column_xyz" in error_text
+        payload = json.loads(result.content[0].text)
+        assert payload["is_error"] is True
+        assert payload["error_type"] == "undefined_column"
+        assert "nonexistent_column_xyz" in payload["message"]
+        assert "password" not in payload["message"].lower()
 
     async def test_bad_table_surfaces_error(self, client):
         """Querying a non-existent table should return an error with the table name."""
@@ -461,8 +472,19 @@ class TestErrorSurfacing:
             "query": "SELECT * FROM ctgov.nonexistent_table_xyz LIMIT 1",
         })
         assert result.is_error is True
-        error_text = result.content[0].text
-        assert "nonexistent_table_xyz" in error_text
+        payload = json.loads(result.content[0].text)
+        assert payload["error_type"] == "undefined_table"
+        assert "nonexistent_table_xyz" in payload["message"]
+
+    async def test_missing_column_hint_names_the_real_column(self, client):
+        """A qualified missing column should point at the closest real column."""
+        result = await client.call_tool("read_query", {
+            "query": "SELECT ion.other_name FROM ctgov.intervention_other_names ion LIMIT 1",
+        })
+        assert result.is_error is True
+        payload = json.loads(result.content[0].text)
+        assert payload["error_type"] == "undefined_column"
+        assert payload["hint"] == "Available similar column: intervention_other_names.name"
 
 
 # ---------------------------------------------------------------------------
@@ -525,6 +547,8 @@ class TestDatabaseInfo:
         assert "pg_version" in info
         assert "schema_name" in info
         assert "table_count" in info
+        assert info["refresh_frequency"] == "daily"
+        assert info["newest_last_update_posted_date"]
         assert "note" in info
 
     async def test_schema_ctgov(self, client):

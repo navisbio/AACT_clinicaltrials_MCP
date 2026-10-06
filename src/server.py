@@ -1,7 +1,9 @@
 import functools
+import json
 import logging
 import re
 from collections import OrderedDict
+from datetime import date, datetime
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -10,11 +12,12 @@ from typing import Annotated
 from dotenv import load_dotenv
 from mcp.server.mcpserver import MCPServer, Context
 from mcp.server.mcpserver.exceptions import ToolError
-from mcp.types import TextContent, ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
 from psycopg2 import sql
 from pydantic import Field
 
-from .database import AACTDatabase
+from .database import AACTDatabase, ClientDatabaseError
+from .error_hints import recovery_hint, referenced_tables
 from .query_guard import query_is_explain
 from .models import (
     GROUNDING_NOTICE,
@@ -134,35 +137,93 @@ def _identifier(name: str, kind: str) -> sql.Identifier:
 
 def grounded_result(data: object) -> list[TextContent]:
     """Return tool result with grounding notice as second content element."""
-    import json
     return [
         TextContent(type="text", text=json.dumps(data, default=str, indent=2)),
         TextContent(type="text", text=GROUNDING_NOTICE),
     ]
 
 
+def relation_summary(relkind: str | None, estimate: int | None) -> tuple[str | None, int | None]:
+    """Return (relation_type, row estimate). Views have no meaningful estimate."""
+    if relkind in ("v", "m"):
+        return "view", None
+    if relkind in ("r", "p", "f"):
+        if estimate is None or int(estimate) < 0:
+            return "table", None
+        return "table", int(estimate)
+    return None, None
+
+
+def _query_error(payload: dict[str, object]) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
+        is_error=True,
+    )
+
+
+def _recovery_hint(db: AACTDatabase, query: str, error: ClientDatabaseError) -> str | None:
+    if error.error_type not in ("undefined_column", "undefined_table"):
+        return None
+    try:
+        if error.error_type == "undefined_table":
+            rows, _ = db.execute_query(
+                """
+                SELECT c.relname AS table_name
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'ctgov'
+                WHERE c.relkind IN ('r', 'v', 'm', 'p')
+                """
+            )
+            return recovery_hint(query, error, {}, [row["table_name"] for row in rows])
+        names = [name for name, _alias in referenced_tables(query)]
+        if error.column_qualifier and error.column_qualifier not in names:
+            names.append(error.column_qualifier)
+        safe = [name for name in dict.fromkeys(names) if _IDENTIFIER.match(name)]
+        columns_by_table: dict[str, list[str]] = {}
+        if safe:
+            rows, _ = db.execute_query(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'ctgov' AND table_name = ANY(%s) "
+                "ORDER BY table_name, ordinal_position",
+                (safe,),
+            )
+            for row in rows:
+                columns_by_table.setdefault(row["table_name"], []).append(row["column_name"])
+        return recovery_hint(query, error, columns_by_table)
+    except Exception:
+        logger.warning("Could not build a column hint for a failed query")
+        return None
+
+
 @mcp.tool(annotations=_tool_annotations("List tables"))
 @_expose_errors
 async def list_tables(ctx: Context):
     """Call this first to discover available tables before writing any queries.
-    Returns all table names in the AACT ctgov schema (studies, interventions, outcomes, etc.)
-    with approximate row counts. Use the returned names with describe_table to inspect columns before querying."""
+    Returns relation names in the AACT ctgov schema (studies, interventions, outcomes, etc.).
+    Tables include an approximate row count. Views, including the all_* relations, return
+    approximate_row_count null because PostgreSQL does not keep a row estimate for them.
+    A null count does not mean the view is empty. Use describe_table before querying."""
     app = _get_ctx(ctx)
     results, _ = app.db.execute_query("""
-        SELECT t.table_name, c.reltuples::bigint AS approximate_row_count
-        FROM information_schema.tables t
-        JOIN pg_class c ON c.relname = t.table_name
+        SELECT c.relname AS table_name,
+               c.relkind,
+               c.reltuples::bigint AS approximate_row_count
+        FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'ctgov'
-        WHERE t.table_schema = 'ctgov'
-        ORDER BY t.table_name;
+        WHERE c.relkind IN ('r', 'v', 'm', 'p')
+        ORDER BY c.relname
     """)
     logger.debug("Retrieved %s tables", len(results))
-    tables = [
-        TableInfo(
-            table_name=row['table_name'],
-            approximate_row_count=max(0, row.get('approximate_row_count', 0)),
-        ).model_dump() for row in results
-    ]
+    tables = []
+    for row in results:
+        relation_type, row_count = relation_summary(row["relkind"], row["approximate_row_count"])
+        tables.append(
+            TableInfo(
+                table_name=row["table_name"],
+                relation_type=relation_type or "table",
+                approximate_row_count=row_count,
+            ).model_dump()
+        )
     return grounded_result(tables)
 
 
@@ -173,7 +234,8 @@ async def describe_table(
     ctx: Context,
 ):
     """Call this before writing a query to learn the column names and types for a table.
-    Returns table_name, approximate_row_count, and a columns list with SQL data types and total_distinct counts.
+    Returns table_name, relation_type, approximate_row_count, and a columns list with SQL data types and total_distinct counts.
+    approximate_row_count is null for a view.
     Use the exact column names in your SELECT queries.
     If the table name is invalid, returns an empty columns list — check list_tables for valid names.
     Low-cardinality columns (≤25 distinct values) include sample_values automatically.
@@ -195,12 +257,18 @@ async def describe_table(
 
     # Get approximate row count from pg_class
     row_count_rows, _ = app.db.execute_query("""
-        SELECT c.reltuples::bigint AS approximate_row_count
+        SELECT c.relkind, c.reltuples::bigint AS approximate_row_count
         FROM pg_class c
         JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'ctgov'
-        WHERE c.relname = %s;
+        WHERE c.relname = %s
     """, {"table_name": table_name})
-    approximate_row_count = max(0, row_count_rows[0]['approximate_row_count']) if row_count_rows else 0
+    if row_count_rows:
+        relation_type, approximate_row_count = relation_summary(
+            row_count_rows[0]["relkind"],
+            row_count_rows[0]["approximate_row_count"],
+        )
+    else:
+        relation_type, approximate_row_count = None, None
 
     # Get n_distinct stats for all columns in this table
     distinct_map: dict[str, int] = {}
@@ -269,6 +337,7 @@ async def describe_table(
     ]
     return grounded_result({
         "table_name": table_name,
+        "relation_type": relation_type,
         "approximate_row_count": approximate_row_count,
         "columns": columns,
     })
@@ -335,6 +404,8 @@ async def read_query(
     to page through them without re-executing the query.
     The query must be one SELECT, WITH (CTE), or EXPLAIN statement. It is parsed before
     it runs, executed in a read-only transaction, and cancelled after 2 minutes.
+    A failed query returns JSON with is_error, error_type, message, and hint.
+    hint names a similar real column or table when one is clear. It does not rewrite the SQL.
     Use WHERE and LIMIT to narrow results.
     If truncated is true, the query had more rows than max_rows — add a LIMIT or tighter WHERE.
 
@@ -367,7 +438,17 @@ async def read_query(
     if query_is_explain(query):
         preview_rows = max_rows
 
-    results, truncated = app.db.execute_query(query, row_limit=max_rows)
+    try:
+        results, truncated = app.db.execute_query(query, row_limit=max_rows)
+    except ClientDatabaseError as exc:
+        return _query_error(exc.as_dict(_recovery_hint(app.db, query, exc)))
+    except ValueError as exc:
+        return _query_error({
+            "is_error": True,
+            "error_type": "query_rejected",
+            "message": str(exc),
+            "hint": None,
+        })
     row_count = len(results)
     logger.debug("Query returned %s rows (truncated=%s)", row_count, truncated)
 
@@ -499,21 +580,35 @@ async def search_columns(
 @mcp.tool(annotations=_tool_annotations("Database info"))
 @_expose_errors
 async def database_info(ctx: Context):
-    """Get database connection info: server time, PostgreSQL version, schema, and table count.
-    Call this to confirm the connection is working and check data currency.
-    Note: AACT refreshes its data from ClinicalTrials.gov weekly."""
+    """Get database connection info and how current the study rows are.
+    Returns server_time, newest_last_update_posted_date, and refresh_frequency.
+    newest_last_update_posted_date is the latest last_update_posted_date in ctgov.studies.
+    It is the newest study update present in this database, not a certified AACT load timestamp.
+    AACT refreshes the database daily. Also returns the PostgreSQL version, schema, and table count."""
     app = _get_ctx(ctx)
 
     info_rows, _ = app.db.execute_query(
-        "SELECT NOW() AS server_time, version() AS pg_version, current_schema() AS schema_name"
+        """
+        SELECT NOW() AS server_time,
+               version() AS pg_version,
+               current_schema() AS schema_name,
+               (SELECT MAX(last_update_posted_date) FROM ctgov.studies)
+                   AS newest_last_update_posted_date,
+               (SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'ctgov')
+                   AS table_count
+        """
     )
-    count_rows, _ = app.db.execute_query(
-        "SELECT COUNT(*) AS table_count FROM information_schema.tables WHERE table_schema = 'ctgov'"
-    )
-
     info = info_rows[0]
-    info['table_count'] = count_rows[0]['table_count']
-    info['note'] = 'AACT data is refreshed weekly from ClinicalTrials.gov.'
+    updated = info.get("newest_last_update_posted_date")
+    if isinstance(updated, datetime):
+        updated = updated.date()
+    if isinstance(updated, date):
+        info["newest_last_update_posted_date"] = updated.isoformat()
+    info["refresh_frequency"] = "daily"
+    info["note"] = (
+        "newest_last_update_posted_date is the latest study update present in "
+        "ctgov.studies, not a certified AACT load timestamp. AACT refreshes the database daily."
+    )
     return grounded_result(info)
 
 
