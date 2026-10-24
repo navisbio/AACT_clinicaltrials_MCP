@@ -2,7 +2,7 @@
 
 import pytest
 
-from src.query_guard import validate_read_only_sql
+from aact_mcp.query_guard import validate_read_only_sql
 
 
 ALLOWED = [
@@ -109,7 +109,7 @@ def test_string_literal_containing_drop_is_allowed() -> None:
 
 
 def test_query_is_explain_helper() -> None:
-    from src.query_guard import query_is_explain
+    from aact_mcp.query_guard import query_is_explain
 
     assert query_is_explain("EXPLAIN SELECT 1") is True
     assert query_is_explain("SELECT 1") is False

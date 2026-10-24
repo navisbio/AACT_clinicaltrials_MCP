@@ -34,7 +34,7 @@ testpaths = ["tests"]
 asyncio_default_fixture_loop_scope = "function"
 
 [project.scripts]
-mcp-server-aact = "src:main"
+mcp-server-aact = "aact_mcp:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src"]
+packages = ["aact_mcp"]

@@ -16,7 +16,7 @@ uv run mcp-server-aact
 uv run pytest
 
 # Type checking
-uv run pyright src/
+uv run pyright aact_mcp/
 
 # Install dependencies (including dev)
 uv sync
@@ -28,14 +28,14 @@ docker run --rm -i --env DB_USER=X --env DB_PASSWORD=Y mcp-server-aact
 
 ## Architecture
 
-Source files in `src/`, each with a single responsibility:
+Source files in `aact_mcp/`, each with a single responsibility:
 
 - **server.py** — FastMCP server definition and tool handlers. Loads `.env` at startup, creates the `AACTDatabase` instance and the `FastMCP` app. All tool handlers are async and use `Context` for structured logging/progress.
 - **database.py** — `AACTDatabase` class wrapping psycopg2. Connects to `aact-db.ctti-clinicaltrials.org` through a small pool with a connect timeout and a statement timeout. Fails hard if `DB_USER`/`DB_PASSWORD` env vars are missing.
 - **query_guard.py** — Parses user SQL and rejects anything other than a single read-only SELECT, WITH, or EXPLAIN statement.
 - **models.py** — Pydantic models (`TableInfo`, `ColumnInfo`, `QueryResult`) used as tool return types.
 
-Entry point: `src/__init__.py` exports `main()` which calls `mcp.run()`.
+Entry point: `aact_mcp/__init__.py` exports `main()` which calls `mcp.run()`.
 
 ## Key Design Decisions
 

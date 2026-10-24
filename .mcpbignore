@@ -1,24 +1,16 @@
-.venv/
-.env
-.git/
-.gitignore
-.mcpbignore
-.pytest_cache/
-.claude/
-.claude-plugin/
-.beads/
-.devcontainer/
-.mcp.json
+# Allowlist: ignore everything, then re-include what the bundle ships.
+# A blocklist let local-only files (old builds in dist/, tunnel state in
+# server/) slip into the archive.
+/*
+
+!/manifest.json
+!/README.md
+!/LICENSE
+!/PRIVACY.md
+
+# The extension runs `uv run --directory ${__dirname} mcp-server-aact`,
+# so it needs the project metadata, lockfile and package source.
+!/pyproject.toml
+!/uv.lock
+!/aact_mcp
 __pycache__/
-tests/
-smoketest/
-skills/
-*.pyc
-*.mcpb
-CLAUDE.md
-notes.txt
-Dockerfile
-docker-compose.yml
-.DS_Store
-run_server.py
-.dockerignore
