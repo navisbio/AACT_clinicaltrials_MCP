@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/navisbio-aact-mcp-badge.png)](https://mseep.ai/app/navisbio-aact-mcp)
+
 # AACT Clinical Trials MCP Server
 
 Query the [AACT](https://aact.ctti-clinicaltrials.org) (ClinicalTrials.gov) database directly from Claude. Explore 70+ tables of clinical trial data — studies, interventions, outcomes, sponsors, facilities — using read-only SQL with buffered pagination.
