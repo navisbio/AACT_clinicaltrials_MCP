@@ -35,7 +35,7 @@ async def client():
     task is properly cancelled regardless.
     """
     from mcp.client import Client
-    from src.server import mcp as server
+    from aact_mcp.server import mcp as server
 
     try:
         async with Client(server, raise_exceptions=True) as session:

@@ -1,4 +1,4 @@
 """Entry point for Claude Desktop extension (uv runtime)."""
-from src import main
+from aact_mcp import main
 
 main()

@@ -17,7 +17,7 @@ COPY pyproject.toml uv.lock ./
 RUN uv sync --frozen --no-dev
 
 # Copy source code
-COPY src/ ./src/
+COPY aact_mcp/ ./aact_mcp/
 COPY README.md ./
 
 # The package is already installed via uv sync
@@ -33,7 +33,7 @@ RUN useradd -m -u 1000 mcpuser
 # Copy virtual environment from builder (uv creates .venv by default)
 COPY --from=builder --chown=mcpuser:mcpuser /app/.venv /opt/venv
 # Also copy the source code since it's referenced
-COPY --from=builder --chown=mcpuser:mcpuser /app/src /opt/venv/lib/python3.12/site-packages/src
+COPY --from=builder --chown=mcpuser:mcpuser /app/aact_mcp /opt/venv/lib/python3.12/site-packages/aact_mcp
 
 # Set environment
 ENV PATH="/opt/venv/bin:$PATH" \

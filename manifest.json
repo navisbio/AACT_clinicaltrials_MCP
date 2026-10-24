@@ -48,7 +48,7 @@
   ],
   "server": {
     "type": "python",
-    "entry_point": "src/__init__.py",
+    "entry_point": "aact_mcp/__init__.py",
     "mcp_config": {
       "command": "uv",
       "args": ["run", "--directory", "${__dirname}", "mcp-server-aact"],

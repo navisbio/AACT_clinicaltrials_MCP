@@ -2,7 +2,7 @@
 
 import psycopg2
 
-from src.database import client_database_error, public_database_error
+from aact_mcp.database import client_database_error, public_database_error
 
 
 def test_connection_failure_hides_host_and_user() -> None:

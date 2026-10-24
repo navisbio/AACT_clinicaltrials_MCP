@@ -1,8 +1,8 @@
 """Column and table hints for failed read-only queries. No database connection."""
 
-from src.database import ClientDatabaseError
-from src.error_hints import closest_identifier, recovery_hint, referenced_tables
-from src.server import relation_summary
+from aact_mcp.database import ClientDatabaseError
+from aact_mcp.error_hints import closest_identifier, recovery_hint, referenced_tables
+from aact_mcp.server import relation_summary
 
 
 def test_view_row_estimate_is_null_and_table_zero_stays_zero() -> None:
