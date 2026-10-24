@@ -10,13 +10,6 @@ ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PYTHON_DOWNLOADS=never
 
-# Install system build dependencies (only for psycopg2)
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
-    python3-dev \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
 # Copy dependency files first (better caching)
 COPY pyproject.toml uv.lock ./
 
@@ -33,12 +26,6 @@ RUN sed -i 's|#!/app/.venv/bin/python|#!/opt/venv/bin/python|' /app/.venv/bin/*
 
 # Stage 2: Minimal runtime image
 FROM python:3.12-slim
-
-# Install only PostgreSQL runtime library
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends libpq5 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
 # Create non-root user
 RUN useradd -m -u 1000 mcpuser
